@@ -168,8 +168,12 @@
       return hay.indexOf(q) >= 0;
     });
   }
+  // Stable sort on ties: equal values keep the board's own rank order, so flipping the sort
+  // direction never shuffles rows that share a number.
   function sortedRows(list) {
     var key = state.sort;
+    var boardOrder = {};
+    DATA.rows.forEach(function (r, i) { boardOrder[r.slug] = i; });
     return list.slice().sort(function (a, b) {
       var av, bv;
       if (key === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
@@ -179,7 +183,7 @@
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
-      return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+      return boardOrder[a.slug] - boardOrder[b.slug];
     });
   }
 
@@ -358,6 +362,20 @@
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
+  // One factor in the value-model breakdown: its label, its number, and a sparkline-like bar whose
+  // width is the factor's share of the largest factor's contribution (clamped to 4..100%).
+  function factorBar(label, value, share, why) {
+    var pct = Math.max(4, Math.min(100, Math.round(share * 100)));
+    return el('div', { class: 'eq-factor' },
+      el('div', { class: 'eq-line' },
+        el('span', { text: label }),
+        el('b', { class: 'num', text: value })
+      ),
+      el('div', { class: 'eq-bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + pct + '%', title: pct + '% of the largest factor\u2019s contribution' })),
+      el('span', { class: 'eq-why', text: why })
+    );
+  }
+
   function openDetail(slug) {
     var row = DATA.rows.filter(function (r) { return r.slug === slug; })[0];
     if (!row) return;
@@ -367,6 +385,14 @@
     var steps = farmSteps(row);
     var recompute = impliedOf(row, DATA.model);
     var anchor = anchorOf(row.category);
+    // The factor bars: each factor's dollar contribution, and the largest one for the bar scale.
+    var g = Math.min(DATA.model.growth_cap, Math.max(DATA.model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
+    var growthMult = 1 + (g / 100) * DATA.model.growth_weight;
+    var ageForModel = row.age_days === null || row.age_days === undefined ? DATA.model.unknown_age_days : row.age_days;
+    var runwayMult = DATA.model.runway_floor + (Math.min(Math.max(ageForModel, 0), DATA.model.runway_days) / DATA.model.runway_days) * DATA.model.runway_range;
+    var contributions = [row.tvl_usd, row.tvl_usd * anchor.multiple, row.tvl_usd * anchor.multiple * growthMult, row.tvl_usd * anchor.multiple * growthMult * runwayMult];
+    var largestContribution = Math.max.apply(null, contributions);
+    var maxAnchor = Math.max(1, anchor.multiple);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'RANK ' + row.rank + ' OF ' + DATA.board_size + (row.is_watchlist ? '  \u00B7  WATCHLIST' : '  \u00B7  EARLY RADAR') }),
@@ -378,16 +404,14 @@
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Value model breakdown' }),
       el('div', { class: 'equation' },
-        el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Anchor multiple (' + (row.category || 'no category') + '), median MCap/TVL of ' + anchor.comparables + ' live comparables' }), el('b', { class: 'num', text: '\u00D7 ' + anchor.multiple })),
-        el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num ' + (row.change_7d !== null && row.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(row.change_7d) })),
-        el('div', null, el('span', { text: 'Growth multiplier \u2014 1 + half the clamped growth' }), el('b', { class: 'num', text: '\u00D7 ' + fmtMult(row.model.growth_multiplier) })),
-        el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Runway multiplier \u2014 0.80 rising to 1.20 over three years' }), el('b', { class: 'num', text: '\u00D7 ' + fmtMult(row.model.runway_multiplier) })),
-        el('div', null, el('span', { text: 'Tie-break \u2014 a stated \u00B10.01% offset from the slug' }), el('b', { class: 'num', text: '\u00D7 ' + (row.model.tie_break || 1) })),
+        factorBar('TVL', fmtUsd(row.tvl_usd), 1, 'the raw capital the protocol holds'),
+        factorBar('Anchor multiple (' + (row.category || 'no category') + '), median MCap/TVL of ' + anchor.comparables + ' live comparables', '\u00D7 ' + anchor.multiple, anchor.multiple / maxAnchor, 'the market\u2019s own multiple, calibrated from this snapshot'),
+        factorBar('Seven-day growth \u2014 momentum ' + fmtPct(row.change_7d), '\u00D7 ' + fmtMult(row.model.growth_multiplier), Math.max(0, (row.model.growth_multiplier - 0.7)) / 0.6, 'half the clamped seven-day change'),
+        factorBar('Age with no token \u2014 runway ' + fmtAge(row.age_days), '\u00D7 ' + fmtMult(row.model.runway_multiplier), Math.max(0, (row.model.runway_multiplier - 0.8)) / 0.4, '0.80 rising to 1.20 over three years'),
+        factorBar('Tie-break \u2014 a stated \u00B10.01% offset from the slug', '\u00D7 ' + (row.model.tie_break || 1), 0.5, 'keeps whole-dollar values distinct'),
         el('div', { class: 'total' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the page recomputes this row as ' + fmtUsd(recompute) + (recompute === row.implied_value_usd ? ', the same number board.json carries \u2014 the page and the board run the same arithmetic.' : ', which differs from the board: the data would be stale.') + ' This is an estimate of what the record implies, not a price.' })
+      el('p', { class: 'sub', text: 'Each bar shows how strongly that factor pushes this protocol\u2019s implied value \u2014 its share of the largest factor\u2019s contribution (' + fmtUsd(largestContribution) + '). Model ' + DATA.model_version + ': the page recomputes this row as ' + fmtUsd(recompute) + (recompute === row.implied_value_usd ? ', the same number board.json carries \u2014 the page and the board run the same arithmetic.' : ', which differs from the board: the data would be stale.') + ' This is an estimate of what the record implies, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
